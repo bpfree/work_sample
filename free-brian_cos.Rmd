@@ -1,0 +1,481 @@
+---
+title: "Center for Ocean Solutions"
+author: "Brian Free"
+date: "09/05/2022"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  word_document:
+    toc: yes
+html_document:
+  df_print: paged
+  toc: yes
+---
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo}
+# Clean environment by removing everything from the list
+rm(list = ls())
+```
+
+```{r workspace}
+#############################################
+#############################################
+##### 1. Get workspace ready
+
+# Install and load commonly used packages 
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(countrycode,
+               cowplot,
+               devtools,
+               dplyr,
+               ggalt,
+               ggplot2,
+               gissr, # remotes::install_github("skgrange/gissr")
+               gridExtra,
+               lubridate,
+               plyr,
+               raster,
+               rgdal,
+               rgeos,
+               rnaturalearth, # use devtools::install_github("ropenscilabs/rnaturalearth") if packages does not install properly
+               scales,
+               sf,
+               sp,
+               stringr,
+               tidyr)
+```
+
+```{r eval = FALSE}
+# Check package versions
+sessionInfo()
+
+# Update packages if needed
+# update.packages()
+```
+
+# Introduction
+The Center for Ocean Solutions seeks to understand the involvement of illegal, unreported, and unregulated fishing feeds into the supply chain. To investigate this, the center has obtain fishing vessel data for nine vessels from [Global Fishing Watch](https://globalfishingwatch.org/datasets-and-code/) along with data on maritime vessels visiting Peru. For the nine vessels, those data detailed the the vessel name, International Maritime Organization vessel number, and the flag. The Peruvian dataset is provides a spatial and temporal lens for the vessels. For instance, they detail timestamps for the vessel locations between 2020 and 2022, along with the vessel class (e.g., bunker, fishing) and gear type (e.g., longline, purse seines, reefer)
+
+From these data, this document will demonstrate how long the vessel was at voyage, where the vessel spent its voyage, and how many hours the voyage took during its activities.
+
+# Methodology
+These data were cleaned and analyzed in R to provide trends and insights into the the vessel data. Aside from already provided data from Global Fishing Watch, the analysis obtained additional data concerning IUU vessel status and flag of convenience designations.
+
+The IUU Vessel List came from [TMT](https://www.iuu-vessels.org/) and were accessed on September 2nd, 2022. 
+
+Given that [Global Fishing Watch](https://globalfishingwatch.org/fisheries/flag-of-convenience-or-cloak-of-malfeasance/) in 2017 referenced [ITF Seafarers](https://www.itfseafarers.org/en) list on Flags of Convenience, this analysis also used that [list](https://www.itfseafarers.org/en/focs/current-registries-listed-as-focs). Presently, ITF lists 42 countries as ones that meet its criteria for being a flag of convenience.
+
+The [Exclusive Economic Zone data](https://marineregions.org/downloads.php) came from [Marine Regions](https://marineregions.org/about.php), which is managed by the Flanders Marine Institute. It is the preeminent authority for EEZ boundaries. These data are current as of 2019. 
+
+Below outlines the following steps taken to analyze and summarize the data:
+
+* Load data
+  + Boundary data
+  + Port data
+  + Vessel data
+* Inspect data
+  + Port data
+  + Vessel data
+* Clean data
+  + Port data
+  + Vessel data
+* Transform data
+  + Port data
+  + Vessel data
+* Analyze data
+  + Domestic vs. foreign landings
+  + Overall foreign landings (>10 visits)
+* Visualize data
+* Findings
+* Export data
+  + Port
+  + Vessel
+  + Summmary
+  + Spatial
+  + Figures
+
+***
+
+# Set working directory and other key directories
+
+```{r directory}
+#############################################
+#############################################
+##### 2. Define presets and data dictionary
+
+# Pre-set values (in this case the year and fishing classes are the most useful)
+
+# Define data directory (since this is in R Project, pathname is simplified)
+data <- "data"
+
+# Define visuals directory (for exporting maps / graphics)
+plotdir <- "figures"
+
+# Define geopackage
+geopackage <- "data/cos_spatial.gpkg"
+
+# map theme
+theme1 <- theme(axis.title=element_blank(),
+                # Gridlines
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.background = element_blank(),
+                axis.line = element_line(colour = "black"),
+                legend.key.size=unit(0.3, "cm"),
+                plot.caption = element_text(size = 6))
+```
+
+# Load data
+The port and vessel datasets were loaded from the data directory. A downloaded file of IUU status and a created file for Flags of Convenience were also loaded from the data directory. The Flags of Convenience data were last updated in 2021. Boundary data for the world and Peru were pulled from the [rnaturalearth R package](https://cran.r-project.org/web/packages/rnaturalearth/README.html). Exclusive Economic Zone boundary data came from [Marine Regions](https://marineregions.org/downloads.php). It should be noted these are older data, as the most current version is 11 from 2019.
+
+```{r load, echo = T, results = 'hide'}
+#############################################
+#############################################
+##### 3. Read in vessel and boundary data
+
+# Read data
+## vessel data
+vessels_gfw <- read.csv(paste(data, "vessels_gfw.csv", sep = "/")) %>%
+  dplyr::select(Vessel.Name,
+                IMO,
+                Flag)
+vessels_info <- read.csv(paste(data, "vessel_information.csv", sep = "/"))
+
+## port data
+port <- read.csv(paste(data, "port_visit_peru.csv", sep = "/"))
+
+## IUU
+iuu_list <- read.csv(paste(data, "iuu_list_20220902.csv", sep = "/"))
+
+## flags of convenience
+foc_list <- read.csv(paste(data, "foc_list.csv", sep = "/"))
+
+# World and country data
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+peru <- rnaturalearth::ne_countries(country = "Peru", scale = "medium", returnclass = "sf")
+
+# EEZ data
+eez <- st_read(dsn = "data/eez_v11.gpkg")
+```
+
+# Inspect data
+
+```{r inspect}
+#############################################
+#############################################
+##### 4. Inspect the data
+
+# vessels data
+names(vessels_gfw)
+dim(vessels_gfw) # 14 rows x 3 columns
+
+dim(vessels_info) # 451 rows x 4 columns
+unique(vessels_info$vessel_class) # 3 vessel classes --> fishing, carrier, bunker
+unique(vessels_info$gear_type) # 15 gear types
+
+View(vessels_gfw) # 5 rows contain N/A values for all fields
+View(vessels_info)
+
+# IUU data
+head(iuu_list)
+
+# ports data
+head(port)
+unique(sort(port$label)) # see that there are Bayovar and Bayovar Peru as well as La Pampilla and La Pampilla Oil Terminal; question will be do they share the same geographic coordinates
+length(unique(port$label)) # there are 46 ports
+
+bayovar_inspection <- port %>%
+  # filter only the Bayovar ports by detecting only values that contain BAYOVAR in the label field
+  dplyr::filter(str_detect(label, "BAYOVAR")) %>%
+  # arrange descending by port name as Bayovar Peru only has four entries -- making it faster to verify if they are separate ports or the same port
+  dplyr::arrange(desc(label)) %>%
+  # open table to inspect the values
+  View() # can see that the ports do have two different geographic locations
+
+la_pampilla_inspection <- port %>%
+  # filter only the La Pampilla ports
+  dplyr::filter(str_detect(label, "LA PAMPILLA")) %>%
+  # arrange ascending by port name
+  dplyr::arrange(label) %>%
+  # open table to inspect the values
+  View() # can see that the ports do have two different geographic locations
+
+unique(la_pampilla_inspection$lat) # returns two different values for the latitude, and after inspection both ports do, in fact, have unique geographic coordinate values
+
+rm(bayovar_inspection)
+rm(la_pampilla_inspection)
+
+```
+
+# Clean data
+To have the best available data for analysis, the outliers were removed from the tracks dataset.
+
+```{r clean}
+#############################################
+#############################################
+##### 5. Clean data for preparation
+
+# Vessels -- Global Fishing Watch
+vessels_clean <- vessels_gfw %>%
+  # select only fields useful for this analysis
+  dplyr::select(Vessel.Name,
+                IMO,
+                Flag) %>%
+  # rename fields for better convention and later joins
+  dplyr::rename("vessel name" = "Vessel.Name",
+                "country" = "Flag") %>% # this will be so that the Flags of Convenience list can be joined with these data to determine if any vessels fly under those flags
+  na.omit()
+
+rm(vessels_gfw) # no longer will be needed
+
+foc_list <- foc_list %>%
+  # create a field field to designate populate with "yes" for country as flag of convenience
+  dplyr::mutate(foc = "yes")
+
+port <- port %>%
+  # convert port names to have title case format (instead of all capitals)
+  dplyr::mutate(label = str_to_title(label)) %>%
+  # rename "label" field to be "port" for easier understanding
+  dplyr::rename(port = "label")
+```
+
+# Transform data
+To determine if any vessels contained with the Global Fishing Watch dataset are more likely to conduct IUU activity, that dataset was joined with the IUU list provided by TMT. Likewise, the vessel dataset was joined with ITF's Flag of Convenience list.
+
+```{r GFW vessel transform}
+#############################################
+#############################################
+##### 6. Transform vessel data
+iuu_vessels <- vessels_clean %>%
+  # join vessels data with the IUU list using the IMO number
+  dplyr::inner_join(iuu_list,
+                    by = "IMO") %>%
+  # view data to see which vessels, if any, are more likely to conduct IUU activity
+  View()
+
+foc_vessels <- vessels_clean %>%
+  # join the vessels data with the Flags of Convenience list using country name
+  dplyr::inner_join(foc_list,
+                    by = "country") %>%
+  # view data to see which vessels, if any, have a Flag of Convenience
+  View()
+```
+
+```{r port vessel transform}
+port_vessels <- vessels_info %>%
+  # join vessel data with port landing data using the SSVID
+  dplyr::inner_join(port,
+                    by = "ssvid") %>%
+  # obtain the country code from the ISO3 code
+  dplyr::mutate(country = countrycode(flag, "iso3c", "country.name")) %>%
+  # move country name after flag field (ISO3 code)
+  dplyr::relocate(country, .after = flag) %>%
+  # separate date
+  tidyr::separate(timestamp, into=c("year", "month", "daytime"), sep="-", remove=F, convert = T) %>%
+  # separate time
+  tidyr::separate(daytime, into=c("day", "time"), sep="T", remove=F, convert = T) %>%
+  # remove unneeded fields
+  dplyr::select(-timestamp,
+                -daytime,
+                -time)
+```
+
+``` {r geographic transformation}
+# create dataset of ports and their coordinates
+port_coords <- port %>%
+  # get single row of ports
+  dplyr::group_by(port) %>%
+  # can use mean, min, max, first(), last() since all the values should be the same
+  dplyr::summarise(lat = mean(lat),
+                   lon = mean(lon))
+```
+
+# Analysis
+The Center for Ocean Solutions is interested in knowing the relationship of vessels that landed in Peruvian ports in 2021. Specifically, what percentage of those landings were conducted by vessels flying under foreign flags; in other words, any vessel with a flag other than Peru when landing at a Peruvian port. Secondly, it wants to know the top 10 ports visited by foreign vessels. This was measured by total aggregate of visitations by foreign vessels. A different way to measure this could have been most number of unique foreign vessels. Aggregate was used given some vessels make numerous visits to the same port, and since the objective is to understand supply chain, more visits is assumed to bring more catch, thus having a greater contribution to the seafood supply chain.
+
+```{r assessment section}
+#############################################
+#############################################
+##### 7. Analysis
+
+# obtain only port landings in 2021
+port_vessels2021 <- port_vessels %>%
+  # obtain only 2021 port landings
+  dplyr::filter(year == 2021) %>%
+  # create a foreign field (Peru = no, not Peru = yes)
+  dplyr::mutate(foreign = ifelse(flag != "PER", "yes", "no"),
+                # create landing field for later calculate percentage of foreign visits
+                landing = 1)
+
+# summarize data by port and gear type
+port_2021_summary <- port_vessels2021 %>%
+  # group data by port and foreign flag status
+  dplyr::group_by(port,
+                  foreign) %>%
+  # calculate total number of visits (i.e., landings) by domestic or foreign vessels for each port
+  dplyr::summarise(visits = n()) %>%
+  # ungroup data
+  dplyr::ungroup() %>%
+  # group by only the port
+  dplyr::group_by(port) %>%
+  # calculate percentage (pct) of visits conducted by only foreign vessels of overall vessel visits
+  dplyr::mutate(pct = round((visits / sum(visits) * 100), digits = 1)) %>%
+  # ungroup data
+  dplyr::ungroup()
+
+# top 10 foreign landing ports
+port_foreign_top10 <- port_2021_summary %>%
+  dplyr::filter(foreign == "yes") %>%
+  arrange(desc(visits)) %>%
+  mutate(port = factor(port, levels=port)) %>%
+  head(10)
+```
+
+```{r spatial transformation}
+# top 10 foreign landing ports as simple feature
+port_foreign_top10_sf <- port_foreign_top10 %>%
+  dplyr::inner_join(port_coords,
+                    by = "port") %>%
+  st_as_sf(.,
+           coords = c("lon", "lat"), crs = 4326)
+
+# create simple feature of only 2021 data for later mapping
+port_vessels2021_sf <- port_vessels2021 %>%
+  st_as_sf(.,
+           coords = c("lon", "lat"), crs = 4326)
+
+```
+
+# Visualize data
+```{r}
+#############################################
+#############################################
+##### 8. Visualize data
+
+## Map of top 10 ports visited by foreign vessels
+map <- ggplot() +
+  # Plot EEZ
+  geom_sf(data = eez, linetype = "dashed", fill = NA, color = "grey10", size = 0.3) +
+  # Plot countries
+  geom_sf(data = world, fill = "grey80", color = "white", size = 0.4) +
+  geom_sf(data = peru, fill = "grey60", color = "white", size = 0.4) +
+  # Plot points
+  geom_sf(data = port_foreign_top10_sf,
+          # foreign vessel contribution to port landings is associated with color
+          aes(colour = pct,
+              # vessel visitation is associated with size
+              size = visits,
+              # make data more transparent so data underneath are visible
+              alpha = 0.2)) +
+  # Crop
+  coord_sf(xlim = c(-70, -82), ylim = c(-20, 2.5)) +
+  # Labels
+  labs(title = "Top 10 Peruvian Ports \nvisited by Foreign Fleets",
+       caption = "Peruvian port landings in 2021 by foreign fleets.\nData source: Center for Ocean Solutions",
+       size = "Visits",
+       color = "Percent") +
+  # Legend
+  guides(alpha = "none") +
+  # Theme
+  theme_bw() +  theme1 +
+  theme(axis.text.y = element_text(angle = 90, hjust = 0.5))
+
+map
+
+## Plot of foreign visits
+bar <- ggplot() +
+  geom_bar(data = port_foreign_top10, aes(x = visits, y = port), stat = "identity") +
+  labs(title = "Top 10 Peruvian Ports visited \nby foreign fleets",
+       caption = "Peruvian port landings in 2021 by foreign fleets.\nData source: Center for Ocean Solutions") +
+  xlab("Visits") +
+  guides(ylab = "none") +
+  theme(axis.title.y = element_blank()) + 
+  guides(fill = guide_colorbar(ticks.colour = "black", frame.colour = "black")) + theme1
+
+bar
+
+g <- gridExtra::grid.arrange(map, bar, ncol = 2, widths=c(0.75, 0.9))
+```
+
+# Findings
+The Center for Oceans Solutions has noted an interest in understanding the role of IUU fishing in the supply chain. From this dataset, three vessels have been identified by TMT as vessels likely to conduct in IUU activity. Those vessels are:
+  
+  * El Shaddai (8025082) flying under South Africa's flag
+  * Phoenix (82429991) flying under Seychelles's flag
+  * Halifax (8529533) flying under Namibia's flag
+  
+None of these vessels fly under flags of convenience. The three vessels that fly under flags of convenience as listed by ITF Seafarers are:
+
+  * Tunago 52 (9230610) flying under Vanuatu's flag
+  * Avra (7809273) flying under Belize's flag
+  * Mega 711 (7053288) flying under Panama's flag
+  
+Domestic vessels generally visit Peruvian ports more than foreign vessels. Only domestic vessels visited 12 Peruvian ports (100% landings by domestic vessels). Foreign vessels had 100% landings only at 2 ports: Casma and Eten. Nine ports have more than 90% of vessels visits by domestic vessels. Supe, in particular, has foreign vessels visit only 0.8% of all visits. Four ports have more than half of visits in 2021 by foreign vessels. These four ports are: Paita (88.1%), Bahia de Matarani (85.7%), Tierra Colorada (79.8%), Paramonga (66.7%).
+
+The top 10 ports with foreign vessel visits in 2021 are:
+ 1. Callao -- 256 (12.2%)
+ 2. Chimbote -- 191 (5.9%)
+ 3. Tambo De Mora -- 83 (12.6%)
+ 4. Tierra Colorada -- 83 (79.8%)
+ 5. Chicama -- 81 (3.3%)
+ 6. Coishco -- 48 (2.8%)
+ 7. Huacho -- 45 (13.2%)
+ 8. Paita -- 37 (88.1%)
+ 9. La Pampilla -- 29 (6.5%)
+ 10. Chancay -- 21 (3.2%)
+
+# Export data
+## Summary
+```{r export}
+#############################################
+#############################################
+##### 9. Export data
+saveRDS(foc_list, file=file.path(data, "foc_list.Rds"))
+saveRDS(iuu_list, file=file.path(data, "iuu_list.RDS"))
+saveRDS(port_foreign_top10, file=file.path(data, "peru_port_foreign_top10.Rds"))
+saveRDS(port_vessels2021, file=file.path(data, "peru_port_vessels2021.RDS"))
+```
+
+## Vessels
+```{r}
+saveRDS(vessels_clean, file=file.path(data, "peru_vessels_clean.Rds"))
+saveRDS(vessels_info, file=file.path(data, "peru_vessels_info.Rds"))
+saveRDS(port_vessels, file=file.path(data, "peru_port_vessels.Rds"))
+saveRDS(port_vessels2021, file=file.path(data, "peru_port_vessels2021.Rds"))
+```
+
+## Port
+```{r}
+saveRDS(port, file=file.path(data, "peru_port.Rds"))
+saveRDS(port_coords, file=file.path(data, "peru_port_coordinates.RDS"))
+```
+
+## Geopackage
+```{r}
+st_write(obj = port_vessels2021_sf, dsn = geopackage, layer = "peru_port_vessels2021", append = F)
+st_write(obj = port_foreign_top10_sf, dsn = geopackage, layer = "peru_port_foreign_top10", append = F)
+st_write(obj = world, dsn = geopackage, layer = "world_countries", append = F)
+st_write(obj = peru, dsn = geopackage, layer = "peru", append = F)
+st_write(obj = eez, dsn = geopackage, layer = "eez", append = F)
+```
+
+## Map
+### Save plots
+```{r}
+ggsave(map, filename = file.path(plotdir, "peru_port_foreign_top10_map.png"),
+       width = 12, height = 8, units = "in", dpi = 600)
+ggsave(bar, filename = file.path(plotdir, "peru_port_foreign_top10_bar.png"),
+       width = 12, height = 8, units = "in", dpi = 600)
+ggsave(g, filename = file.path(plotdir, "peru_port_foreign_top10_combined.png"),
+       width = 12, height = 8, units = "in", dpi = 600)
+```
+

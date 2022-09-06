@@ -1,0 +1,768 @@
+---
+title: "Global Fishing Watch"
+author: "Brian Free"
+date: "6/22/2022"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  word_document:
+    toc: yes
+html_document:
+  df_print: paged
+  toc: yes
+---
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo}
+# Clean environment by removing everything from the list
+rm(list = ls())
+```
+
+```{r}
+#############################################
+#############################################
+##### 1. Get workspace ready
+
+# Install and load required packages 
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(devtools,
+               dplyr, # to learn more visit here: <https://dplyr.tidyverse.org//>
+               ggplot2, # package to plot visualizations
+               plyr,
+               rgeos,
+               rgdal,
+               rnaturalearth, # use devtools::install_github("ropenscilabs/rnaturalearth") if packages does not install properly
+               scales,
+               sf, # simple features package to visualize spatial data
+               sp, # package for using spatial data
+               stringr, # package to help filter data
+               tidyr) # use of tidyverse
+
+remotes::install_github("FRBCesab/robinmap")
+```
+
+```{r eval = FALSE}
+# Check package versions
+sessionInfo()
+
+# Update packages if needed
+# update.packages()
+```
+
+# Introduction
+The Joint Analytical Cell obtained fishing vessel data within the Mediterranean in 2019. The partnership aims to partner with decision makers on examining fishing behaviour in a closure area near Egypt and a regulated area off the Spainish coast. In particular interest are trawler and longliners.
+
+# Methodology
+These data were cleaned and analyzed in R to provide trends and insights into fishing behaviour for the targeted areas in 2019. While this analysis is not comprehensive, since it lacks time stamp data, it does seeks to measure fishing effort within the targeted areas.
+
+Below outlines the following steps taken to analyze and summarize the data:
+
+* Load data
+  + Fish data
+  + Area data
+* Inspect data
+  + Area data
+  + Fish data
+    1. Year
+    2. Fishing class
+* Clean data
+  + Filter year
+  + Fishing classes
+* Transform data
+  + Convert into spatial data
+  + Inside / outside data
+* Analyze data
+  + Inside vs. outside
+    1. Closure
+    2. Other
+  + Fishing class effort
+* Visualize data
+  + Trawlers
+  + Longlines
+  + Closure vs. Other
+* Patterns / insights
+* Management decisions
+* Future research
+* Export data
+
+
+***
+
+```{r}
+#############################################
+#############################################
+##### 2. Define presets and data dictionary
+
+# Pre-set values (in this case the year and fishing classes are the most useful)
+yr <- 2019
+class_types <- c("Trawlers|Longline")
+vessels_in_closure <- c("KONSTANTINOSAGGELIK|CHRISOPIGITAXIARHIS")
+
+# World and ocean data
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+# Define data directory (since this is in R Project, pathname is simplified)
+data <- "data"
+
+# Define visuals directory (for exporting maps)
+plotdir <- "figures"
+
+# Define geopackage
+geopackage <- "data/fish_spatial.gpkg"
+```
+
+# Load data
+The two different polygon spatial data for management along with the 2019 Mediterranean fishing data are loaded from the data directory. 
+
+```{r echo = T, results = 'hide'}
+#############################################
+#############################################
+##### 3. Read in area and fishing data
+
+# Read data
+## Fishing area
+closure <- sf::st_read(dsn = data, layer = "closuresPolygon")
+other <- st_read(dsn = data, layer = "other_areas")
+
+## Fishing data
+fish <- read.csv(paste(data, "eu_analyst_fishing_data.csv", sep = "/"))
+```
+
+# Inspect data
+## Area data
+Inspecting the data highlights more than if they will need more than cleaning and transforming. It is helpful to understand the data and gain a quick grasp of what we are working with. For instance, we will see that the "Closure" is a full area closure, while "Other" has access regulations due to essential habitat. This will become useful knowledge later when we discuss patterns and trends.
+
+In this case, by inspecting the data, we see that the area data have the same coordinate system, which helps since no reprojection will be needed. However, the "Other" area does have an extra field ("LOCAL_DESC"). To combine the two datasets, that field was removed as it did not contain any information; adding the field to the "Closure" area would not have added any additional information.
+
+```{r}
+#############################################
+#############################################
+##### 4. Inspect the data
+
+# Inspect data
+## Inspecting fishing areas
+### Determine how many areas are of interest
+dim(closure) # 1 observation with 12 attributes
+dim(other) # 1 observation with 13 attributes
+
+### Examine coordinate systems to see if they match and what the fishing data will have to be projected into (as it is currently as a CSV)
+sf::st_crs(closure) # WGS 84
+```
+
+```{r echo = T, results = "hide"}
+st_crs(other) # WGS 84
+```
+
+```{r}
+### Inspect field names (attributes) to discern the differences between the data
+names(closure)
+names(other) # "Other" has an extra field ("LOCAL_DESC"), which does not contain any information; so this will be deleted later
+
+### View data as a table
+View(closure)
+View(other)
+
+### Edit "Other" so its data matches same format as "Closure" data
+other <- other %>%
+  # remove local description field
+  dplyr::select(-LOCAL_DESC)
+
+### Combine the data to analyze for total fishing effort inside areas later
+areas <- rbind(closure,
+               other)
+
+##### Note: Fortunately both areas are in the same coordinate system, so nothing more needs to be done when combined
+
+### Examine the data visualize quickly
+quick_map <- ggplot() +
+  # plot countries
+  geom_sf(data = world, fill="grey85", col="white", size=0.2) +
+  # plot areas
+  # closure area
+  geom_sf(data = closure, fill = "darkblue") +
+  # other area
+  geom_sf(data = other, fill = "lightblue") +
+  # zoom on area of interest
+  xlim(0, 40) +
+  ylim(30, 44) +
+  # generic ggplot2 theme that removes grey background
+  theme_bw()
+quick_map
+
+### Remove quick map since it verified the two different areas
+rm(quick_map)
+```
+
+## Fish data
+The fisheries data inspection will focus more on having the highest quality data. Observations for the fishing vessels lack data in certain fields. The analysis is most interested in attributes pertaining to location (longitude, latitude), year, fishing hours, and fishing class. Any data that did not contain information for all of these fields were excluded. For instance, some observations did not have year data while others lacked a fishing class. From the original 123,934 observations, 67,166 contained data for all the critical attributes.
+
+```{r}
+## Inspecting fishing data
+### Structure of the fisheries data
+str(fish)
+
+### Inspect top 5 rows of the fishing data
+head(fish, 5)
+
+### Data dimensions
+dim(fish) # 123,934 observations with 10 fields
+
+### View the entire fish dataset
+View(fish)
+
+### But does the dataset contain any observations with N/A values?
+any(is.na(fish)) # TRUE --> missing values
+
+### So there are observations missing values. Which observations are complete?
+head(complete.cases(fish), 10) # That returns TRUE/FALSE for each row. I wanted to inspect which observations were missing and how much data were missing and for which inputs. Only returns first 10 observations.
+
+### Obtain data with N/A values
+fish_na <- fish[rowSums(is.na(fish)) > 0,] 
+
+### But, how many observations are without complete data?
+dim(fish_na) # Apparently 116908 rows have some form of data missing
+
+##### Note: If any spatial data creates issues, use st_make_valid() from sf package as a first test to see if that fixes the issues
+
+### Remove any observations missing data for key fields (longitude, latitude, fishing hours, fishing class, and year)
+fish_complete <- fish %>%
+  # filter any information that does not have NA values for key fields
+  filter(!is.na(lat_bin) & # latitude
+         !is.na(lon_bin) & # longitude
+         !is.na(fishing_hours) & # fishing hours
+         !is.na(fishing_class) & # fishing classes
+         !is.na(year)) # year
+dim(fish_complete) # 67,166 observations
+
+### Inspect which years exist for the datasets
+unique(fish$year) # returns NA values, so certain data are unknown for which year they occurred in
+unique(fish_complete$year)
+
+### Inspect fishing classes that exist for the datasets
+unique(fish$fishing_class)
+unique(fish_complete$fishing_class) # has 1 fewer fishing classes than the overall dataset; class missing is: ""
+
+### Remove the fish_na dataset, as that dataset was only for data inspection, not for data analysis
+rm(fish,
+   fish_na)
+```
+
+# Clean data
+Fish data are cleaned to contain only 2019 data and make fishing classes clearer to read.
+
+```{r}
+#############################################
+#############################################
+##### 5. Clean the fishing data
+
+# Filter fish data for only 2019 and recode fishing class names
+fish_2019 <- fish_complete %>%
+  # set to the pre-set value for year, which in this case is 2019
+  dplyr::filter(year == yr) %>%
+  # recode fishing classes
+  dplyr::mutate(fishing_class=recode(fishing_class,
+                                     "dredge_fishing" = "Dredge Fishing",
+                                     "purse_seines" = "Purse Seines",
+                                     "pots_and_traps" = "Pots and Traps",
+                                     "other_fishing" = "Other Fishing",
+                                     "pole_and_line" = "Pole and Line",
+                                     "squid_jigger" = "Squid Jigger",
+                                     "trollers" = "Trollers",
+                                     "fixed_gear" = "Fixed Gear",
+                                     "other_seines" = "Other Seines",
+                                     "fishing" = "Fishing",
+                                     "trawlers" = "Trawlers",
+                                     "set_gillnets" = "Set Gillnets",
+                                     "set_longlines" = "Set Longlines",
+                                     "tuna_purse_seines" = "Tuna Purse Seines",
+                                     "drifting_longlines" = "Drifting Longlines",
+                                     "other_purse_seines" = "Other Purse Seines"))
+unique(fish_2019$year) # returns only 2019 data
+unique(fish_2019$fishing_class) # inspect recoded fishing classes
+nrow(fish_2019) # returns same number of values as complete data which makes sense since all NA values were previous removed
+```
+
+# Transform data
+## Creating spaital data
+Currently fish data are contained in a csv and they do not have a coordinate system. This means they currently cannot be analyzed spatially against the interested areas. Thus, they will need to be defined in the area data's projection (WGS84). Fortunately, the fisheries data have longitude and latitude attributes.
+
+As will be seen in the map below, some of the fishing data appears to fall inland in a few countries (e.g., Spain, Italy, France, Egypt). These are probably due to errors in the GPS records. Vessels have been known to spoof their location data. If that were to occur, it may be possible that the location data would appear on land.
+
+```{r}
+#############################################
+#############################################
+##### 6. Transform the fishing data / Create Spatial data
+
+# Project into WGS 84
+fish_spatial <- st_as_sf(fish_2019,
+                          # use fields for coordinates
+                          # use longitude field for x
+                          coords = c(x = "lon_bin",
+                          # use latitude field for y
+                                     y = "lat_bin"),
+                          # match coordinate reference system as fishing area data (WGS 84)
+                          crs = 4326)
+
+# Generate a quick map of the fishing data with the areas data
+quick_fish <- ggplot() +
+  # fish data
+  geom_sf(data = fish_spatial, color = "yellow", size = 0.1) +
+  # areas
+  geom_sf(data = areas, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(0, 40) +
+  ylim(30, 44) +
+  theme_bw()
+quick_fish
+
+# Remove fish data that does not have spatial components and the maps
+rm(fish_complete,
+   fish_2019,
+   quick_fish)
+```
+
+## Inside / Outside fisheries data
+In order to calculate the fishing hours for fishing vessel classes inside closure areas in 2019, the analysis had to separate the fisheries data to have only those inside the two areas.
+
+Across both areas are 1225 observations. Most observations occurred in the "Other" area with 1103, while 22 observations were located in the "Closure" area. Two different vessels comprised the 22 observations in the "Closure" area.
+
+It makes sense that more vessels occurred inside the "Other" area, since it is not a hard closure, but just has regulations due to habitat.
+
+Note that the only fishing vessel class in the "Closure" area is a drifting longline and that the flag for both vessels is Greece (GRC).
+
+```{r}
+# Obtain fisheries data inside areas
+fish_inside_areas <- st_intersection(fish_spatial, areas) # 1225 observations
+fish_inside_closure <- st_intersection(fish_spatial, closure) # 22 observations
+fish_inside_other <- st_intersection(fish_spatial, other) # 1103 observations
+
+nrow(fish_inside_closure) + nrow(fish_inside_other)
+
+View(fish_inside_closure); unique(fish_inside_closure$shipname) # two different vessels but use the same flag of Greece (GRC)
+View(fish_inside_other)
+
+# View fisheries data and closures
+## Both areas
+fish_inside_map <- ggplot() +
+  # fish data
+  geom_sf(data = fish_inside_areas, color = "yellow", size = 0.5) +
+  # areas
+  geom_sf(data = areas, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(0, 40) +
+  ylim(30, 44) +
+  theme_bw()
+fish_inside_map
+
+# Only closure area
+fish_inside_closure_map <- ggplot() +
+  # fish data
+  geom_sf(data = fish_inside_closure, aes(shape = fishing_class), color = "yellow", size = 1) +
+  # areas
+  geom_sf(data = closure, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(30, 36) +
+  ylim(30, 34) +
+  guides(shape = guide_legend(title = "Fishing Class")) +
+  theme_bw()
+fish_inside_closure_map
+
+# Only other area
+fish_inside_other_map <- ggplot() +
+  # fish data
+  geom_sf(data = fish_inside_other, aes(shape = fishing_class, color = fishing_class), size = 1) +
+  # areas
+  geom_sf(data = other, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(3, 6) +
+  ylim(41, 44) +
+  # adapt legend
+  scale_shape_manual(name = "Fishing Class", # change title of legend
+                     # set labels
+                     labels = c("Fishing",
+                                "Set Gillnets",
+                                "Set Longlines",
+                                "Trawlers",
+                                "Trollers",
+                                "Tuna Purse Seines"),
+                     # change shape values (3 = plus sign, 5 = diamond, 1 = circle, 4 = x, 2 = triangle, 8 = asterisk) -- <http://www.sthda.com/english/wiki/ggplot2-point-shapes>
+                     values = c(3, 5, 1, 4, 2, 8),
+                     # colors come from ColorBrewer (<https://colorbrewer2.org/#type=qualitative&scheme=Dark2&n=6>)
+                     guide = guide_legend(override.aes = list(color = c("#1b9e77",
+                                                                        "#d95f02",
+                                                                        "#7570b3",
+                                                                        "#e7298a",
+                                                                        "#66a61e",
+                                                                        "#e6ab02")))) +
+  guides(color = FALSE) +
+  theme_bw()
+fish_inside_other_map
+```
+
+## Outside areas
+Here is a map of the fisheries data outside the two areas.
+
+```{r}
+# Obtain fisheries data outside areas
+fish_outside_areas <- st_difference(fish_spatial, st_union(st_combine(areas)))
+
+fish_outside_areas_map <- ggplot() +
+  # fish data
+  geom_sf(data = fish_outside_areas, color = "yellow", size = 0.2) +
+  # areas
+  geom_sf(data = areas, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(0, 40) +
+  ylim(30, 44) +
+  theme_bw()
+fish_outside_areas_map
+
+# Remove maps
+rm(fish_inside_map,
+   fish_inside_closure_map,
+   fish_inside_other_map,
+   fish_outside_areas_map)
+```
+
+# Analyse data
+## Inside / Outside
+Across all fishing vessels in 2019, they spent more than 5.5 million hours fishing. Trawlers are the dominate fishing vessel class hours. That alone logged 4.1 million hours. Another million hours were logged by tuna purse seines, other purse seines and fishing. Four vessel classes logged no hours: other fishing, other seines, pole and line, and trollers.
+
+Inside both areas, trawlers also logged the most hours. It logged nearly 90% of the total 17667 logged in the areas. Longlines added close to another 1600 hours across both areas.
+
+Thus, more than 99.5% of all fishing hours were logged outside of the areas. 
+```{r}
+#############################################
+#############################################
+##### 7. Analyze fishing data
+
+# Calculate fishing hours by gear type
+## Calculate effort by gear type for 2019 complete data
+fish_effort_2019 <- round(sum(fish_spatial$fishing_hours), 2)
+print(paste(fish_effort_2019, "total hours spent fishing"))
+
+## Group by gear type
+fish_spatial_effort <- fish_spatial %>%
+  # for faster calculations, convert to data frame
+  as.data.frame() %>%
+  # consolidate by unique fishing class
+  dplyr::group_by(fishing_class) %>%
+  # then calculate sum of fish hours for each unique class
+  dplyr::summarise(hour_total = sum(fishing_hours))
+
+head(fish_spatial_effort)
+View(fish_spatial_effort)
+sum(fish_spatial_effort$hour_total)
+
+# Remove total hour calculations
+rm(fish_effort_2019)
+
+##############
+##############
+
+## Group by gear type
+### Fishing effort inside both areas
+fish_effort_inside <- fish_inside_areas %>%
+  # for faster calculations, convert to data frame
+  as.data.frame() %>%
+  # consolidate by unique fishing class
+  dplyr::group_by(fishing_class) %>%
+  # then calculate sum of fish hours for each unique class
+  dplyr::summarise(hour_total = sum(fishing_hours))
+
+head(fish_effort_inside)
+print(paste(round(sum(fish_effort_inside$hour_total),0), "total hours spent fishing inside areas"))
+
+View(fish_effort_inside)
+
+### Fishing effort outside both areas
+fish_effort_outside <- fish_outside_areas %>%
+  # for faster calculations, convert to data frame
+  as.data.frame() %>%
+  # consolidate by unique fishing class
+  dplyr::group_by(fishing_class) %>%
+  # then calculate sum of fish hours for each unique class
+  dplyr::summarise(hour_total = sum(fishing_hours))
+
+head(fish_effort_outside)
+print(paste(round(sum(fish_effort_outside$hour_total),0), "total hours spent fishing outisde areas"))
+
+View(fish_effort_outside)
+```
+
+## Fishing vessel effort (trawlers / longlines)
+```{r}
+#############################################
+#############################################
+##### 8. Analyze Trawler and Longline data
+
+# Subset trawler and longline fishing vessel data for inside areas
+## Trawler and drifting + set longlines
+trawlers_longlines_inside <- fish_inside_areas %>%
+  # filter for only fishing class types of interest, as defined in the pre-sets
+  dplyr::filter(str_detect(fishing_class, class_types))
+
+## All other vessel types
+other_vessels_inside <- fish_inside_areas %>%
+  # filter for fishing class types not of interest, as defined in the pre-sets
+  dplyr::filter(!str_detect(fishing_class, class_types))
+
+## Verify that both datasets add up to complete dataset
+nrow(trawlers_longlines_inside) + nrow(other_vessels_inside)
+
+## Check that the longline and trawler fishing classes are 
+unique(trawlers_longlines_inside$fishing_class)
+
+View(trawlers_longlines_inside)
+
+##############
+##############
+
+# Subset data for closure and other area specifically
+## Closure area trawler and longline vessels
+trawlers_longlines_closure <- fish_inside_areas %>%
+  # filter data for fishing classes of interest and by area
+  dplyr::filter(str_detect(fishing_class, class_types), # filter for only fishing class types of interest, as defined in the pre-sets
+                GLOB_TYPE == "VME") # filter for only fishing class types of interest, as defined in the pre-sets
+
+# Other area trawler and longline vessels
+trawlers_longlines_other <- fish_inside_areas %>%
+  # filter data for fishing classes of interest and by area
+  dplyr::filter(str_detect(fishing_class, class_types), # filter for only fishing class types of interest, as defined in the pre-sets
+                GLOB_TYPE == "OTHER") # filter for only fishing class types of interest, as defined in the pre-sets
+
+# Check fishing vessel types in area
+unique(trawlers_longlines_closure$fishing_class) # only has drifting longlines in closure
+unique(trawlers_longlines_other$fishing_class) # only has trawlers and set longlines in other
+
+# Remove unused data
+rm(other_vessels_inside)
+```
+
+# Visualize data
+```{r}
+#############################################
+#############################################
+##### 9. Visualize Trawler and Longline data
+
+## Map of fishing vessels in closure area
+closure_plot <- ggplot() + 
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(30, 36) +
+  ylim(30, 34) +
+  geom_sf(data = closure, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  geom_sf(data = trawlers_longlines_closure, aes(shape=fishing_class), color = "darkblue", size = 0.5) +
+  guides(shape = guide_legend(title = "Fishing Class")) +
+  theme_bw()
+closure_plot
+
+## Map of the fishing vessels that went into closure area -- see if there are any discernible patterns in movements
+closure_vessels <- fish_spatial %>%
+  filter(str_detect(shipname, vessels_in_closure))
+
+vessel_closure_map <- ggplot() +
+  geom_sf(data = areas, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  geom_sf(data = world, fill = NA, color = "black", size = 0.2) +
+  geom_sf(data = closure_vessels, aes(color = shipname), size = 0.5) +
+  # zoom on area of interest
+  xlim(28, 36) +
+  ylim(30, 36) +
+  guides(color = guide_legend(title = "Ship name")) +
+  theme_bw()
+vessel_closure_map
+
+## Map of fishing vessels in other area
+other_plot <- ggplot() +
+  # fish data
+  geom_sf(data = fish_inside_other, aes(shape = fishing_class, color = fishing_class), size = 1) +
+  # areas
+  geom_sf(data = other, fill = NA, linetype = "longdash", color = "red", size = 0.5) +
+  # plot countries
+  geom_sf(data = world, fill = NA, col="black", size = 0.2) +
+  # zoom on area of interest
+  xlim(3, 6) +
+  ylim(41, 44) +
+  # adapt legend
+  scale_shape_manual(name = "Fishing Class", # change title of legend
+                     # set labels
+                     labels = c("Fishing",
+                                "Set Gillnets",
+                                "Set Longlines",
+                                "Trawlers",
+                                "Trollers",
+                                "Tuna Purse Seines"),
+                     values = c(3, 5, 1, 4, 2, 8),
+                     guide = guide_legend(override.aes = list(color = c("#1b9e77",
+                                                                        "#d95f02",
+                                                                        "#7570b3",
+                                                                        "#e7298a",
+                                                                        "#66a61e",
+                                                                        "#e6ab02")))) +
+  guides(color = FALSE) +
+  theme_bw()
+other_plot
+```
+
+# Patterns / insights
+The data provide avenues to examine how fishing vessel classes, fishing hours, flags, and total number of observations have occurred in 2019 across the study areas. By grouping and summarizing the total hours and total observations, we can see which countries and fishing vessel classes are most prevalent inside and outside the areas. For instance, it is seen that the only fishing vessels to go into the closure area -- an area that should have no vessels -- were two drifting longlines flying with Greek flags.
+
+Despite being the only country that ventured into the closed area, Greece does not have the most drifting longline hours as a country. That is Italy, which has nearly more than 1000 hours over the next closest which is Cyprus. Greece logged only 232 hours. Italy and France have the most vessels recording hours flying under their flags.
+
+Spain and France hold the top 6 flagged fishing vessels classes that operate in the "Other" area. Further examining flag trends, fishing vessels operating and logging hours in the Mediterranean are predominately flying under European flags. Seven of the top ten flags for total hours logged are European countries; the three not European are Israel (5th), Belize (9th), and China (10th). Libya is the only north Africa country bordering the Mediterranean that has any vessels flying its flag; it had a single vessel which did not record an hour logged.
+
+```{r}
+#############################################
+#############################################
+##### 10. Examine patterns and trends data
+flag_class <- fish_spatial %>%
+  as.data.frame() %>%
+  dplyr::group_by(flag,
+                  fishing_class) %>%
+  dplyr::summarise(count = n(),
+                   total_hours = sum(fishing_hours)) %>% # can adapt to have total hours by flag / fishing class
+  dplyr::arrange(desc(count))
+head(flag_class)
+
+flag <- fish_spatial %>%
+  as.data.frame() %>%
+  dplyr::group_by(flag) %>%
+  dplyr::summarise(count = n(),
+                   total_hours = sum(fishing_hours)) %>% # can adapt to have total hours by flag / fishing class
+  dplyr::arrange(desc(count))
+View(flag)
+
+name_mmsi <- fish_spatial %>%
+  as.data.frame() %>%
+  dplyr::group_by(shipname,
+                  MMSI) %>%
+  dplyr::summarise(count = n()) %>%
+  dplyr::arrange(desc(count))
+head(name_mmsi)
+
+name_mmsi_flag <- fish_spatial %>%
+  as.data.frame() %>%
+  dplyr::group_by(shipname,
+                  MMSI,
+                  flag) %>%
+  dplyr::summarise(count = n()) %>%
+  dplyr::arrange(desc(count))
+head(name_mmsi_flag)
+
+##############
+##############
+
+flag_closure <- fish_inside_closure %>%
+  as.data.frame() %>%
+  dplyr::group_by(flag) %>%
+  dplyr::summarise(count = n())
+head(flag_closure)
+
+vessel_closure <- fish_inside_closure %>%
+  as.data.frame() %>%
+  dplyr::group_by(shipname) %>%
+  dplyr::summarise(count = n()) %>%
+  dplyr::arrange(desc(count))
+head(vessel_closure)
+
+flag_other <- fish_inside_other %>%
+  as.data.frame() %>%
+  dplyr::group_by(flag,
+                  fishing_class) %>%
+  dplyr::summarise(count = n()) %>%
+  dplyr::arrange(desc(count))
+head(flag_other)
+
+vessel_other <- fish_inside_other %>%
+  as.data.frame() %>%
+  dplyr::group_by(shipname) %>%
+  dplyr::summarise(count = n()) %>%
+  dplyr::arrange(desc(count))
+head(vessel_other)
+```
+
+# Management capabilities
+Having possession of AIS would assist with management capabilities. First a current limitation of these data are the lack of time data. Presently all is known is that at some point these vessels were observed at those locations and logged the number of hours. This can aid enforcement authorities in recording fines against the two Greek vessels that logged time in closure areas. That being said, with more current data, the authorities could perhaps enforce the closed area. There was a [Nature paper](https://www.nature.com/articles/nature21708) that highlighted how shortfalls in marine protected areas were often due to lack of staffing (enforcement) and budgetary constraints.
+
+With AIS data that also contains time data, management authorities and decision makers could see the prevalence of vessels entering or operating alongside closed areas. They could also begin to investigate how close vessels are approaching closed areas and how much time is spent alongside them. Furthermore, managers can identify if any particular vessels are close to each other for prolonged periods of time. Or if particular vessels are always seeming at a distance from each other. Knowing when vessels most often operate near closed areas, where they often operate, and which vessels are logging the time can aid managers to support the closed areas. Even with tightened staff numbers and depressed budgets, managers could enforce the closed areas for success
+
+# Future research
+With more data and time, it would be interesting to further investigate a variety of questions.
+
+For example, are there countries whose flag vessels fly that prioritize a particular area? Perhaps this is due to the countries geographic proximity, but is there a species that is a delicacy or important part of the societies cuisine. Similarly, are there vessels that dominate a particular area. This could be viewed two different ways. First, does the vessel spend most of its time in a specific geographic area? Or, secondly, does a vessel for a particular area log an overwhelming majority / plurality of hours compared to all vessels? Further, are there any vessels that spend a majority (or above average time) close to the closed / managed areas?
+
+# Export data
+
+## Areas
+```{r}
+saveRDS(areas, file=file.path(data, "areas.Rds"))
+```
+
+## Fish
+```{r}
+saveRDS(fish_spatial, file=file.path(data, "fish_spatial.Rds"))
+saveRDS(fish_inside_closure, file=file.path(data, "fish_inside_closure.Rds"))
+saveRDS(fish_inside_other, file=file.path(data, "fish_inside_other.Rds"))
+saveRDS(fish_inside_areas, file=file.path(data, "fish_inside_areas.Rds"))
+```
+
+## Fish effort
+```{r}
+saveRDS(fish_effort_inside, file=file.path(data, "fish_effort_inside.Rds"))
+saveRDS(fish_effort_outside, file=file.path(data, "fish_effort_outside.Rds"))
+saveRDS(fish_spatial_effort, file=file.path(data, "fish_spatial_effort.Rds"))
+```
+
+## Trawlers / longline
+```{r}
+saveRDS(trawlers_longlines_closure, file=file.path(data, "trawlers_longlines_closure.Rds"))
+saveRDS(trawlers_longlines_other, file=file.path(data, "trawlers_longlines_other.Rds"))
+saveRDS(trawlers_longlines_inside, file=file.path(data, "trawlers_longlines_inside.Rds"))
+```
+
+## Summarized data
+```{r}
+saveRDS(flag_class, file=file.path(data, "flag_class.Rds"))
+saveRDS(name_mmsi, file=file.path(data, "name_mmsi.Rds"))
+saveRDS(name_mmsi_flag, file=file.path(data, "name_mmsi_flag.Rds"))
+
+saveRDS(flag_closure, file=file.path(data, "flag_closure.Rds"))
+saveRDS(vessel_closure, file=file.path(data, "vessel_closure.Rds"))
+
+saveRDS(flag_other, file=file.path(data, "flag_other.Rds"))
+saveRDS(vessel_other, file=file.path(data, "vessel_other.Rds"))
+```
+
+## Maps
+```{r}
+ggsave(closure_plot, filename = file.path(plotdir, "closure_plot_map.tiff"),
+       width = 12, height = 8, units = "in", dpi = 600, compression = "lzw")
+ggsave(other_plot, filename = file.path(plotdir, "other_plot_map.tiff"),
+       width = 12, height = 8, units = "in", dpi = 600, compression = "lzw")
+ggsave(vessel_closure_map, filename = file.path(plotdir, "vessel_closure_map.tiff"),
+       width = 12, height = 8, units = "in", dpi = 600, compression = "lzw")
+```
+
+## Spatial data
+```{r}
+st_write(obj = fish_spatial, dsn = geopackage, layer = "fish_spatial", append = F)
+```

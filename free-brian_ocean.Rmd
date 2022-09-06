@@ -1,0 +1,389 @@
+---
+title: "Oceana Illegal Fishing and Transparency"
+author: "Brian Free"
+date: "6/22/2022"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  word_document:
+    toc: yes
+html_document:
+  df_print: paged
+  toc: yes
+---
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo}
+# Clean environment by removing everything from the list
+rm(list = ls())
+```
+
+```{r workspace}
+#############################################
+#############################################
+##### 1. Get workspace ready
+
+# Install and load required packages 
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(cowplot,
+               devtools,
+               dplyr,
+               ggalt,
+               ggplot2,
+               gissr, # remotes::install_github("skgrange/gissr")
+               grid,
+               lubridate,
+               plyr,
+               raster,
+               rgdal,
+               rgeos,
+               rnaturalearth, # use devtools::install_github("ropenscilabs/rnaturalearth") if packages does not install properly
+               scales,
+               sf,
+               sp,
+               stringr,
+               tidyr)
+```
+
+```{r eval = FALSE}
+# Check package versions
+sessionInfo()
+
+# Update packages if needed
+# update.packages()
+```
+
+# Introduction
+Oceana obtained fishing vessel data for the [Raymi](https://www.marinetraffic.com/en/ais/details/ships/shipid:168217/mmsi:224892000/imo:9024619/vessel:RAYMI). These data included its position during a 2-month period in 2017 and the activities it took during that voyage. From these data, this document will demonstrate how long the vessel was at voyage, where the vessel spent its voyage, and how many hours the voyage took during its activities.
+
+# Methodology
+These data were cleaned and analyzed in R to provide trends and insights into the Raymi's during June and July 2017.
+
+Below outlines the following steps taken to analyze and summarize the data:
+
+* Load data
+  + Boundary data
+  + Track data
+  + Vessel data
+* Inspect data
+  + Track data
+  + Vessel data
+    1. Anchorage
+    2. Fishing
+* Clean data
+  + Track data
+  + Vessel data
+* Transform data
+  + Vessel data
+    1. Time
+    2. Event type
+* Analyze data
+  + Days a sea
+  + Total event hours
+  + Daily event hours
+  + Monthly event hours
+* Visualize data
+* Patterns / insights
+* Export data
+  + Track
+  + Vessel
+  + Summary data
+  + Spatial
+  + Figures
+
+***
+
+# Set working directory and other key directories
+
+```{r directory}
+#############################################
+#############################################
+##### 2. Define presets and data dictionary
+
+# Pre-set values (in this case the year and fishing classes are the most useful)
+
+# Define data directory (since this is in R Project, pathname is simplified)
+data <- "data"
+
+# Define visuals directory (for exporting maps)
+plotdir <- "figures"
+
+# Define geopackage
+geopackage <- "data/oceana_spatial.gpkg"
+
+# map theme
+theme1 <- theme(axis.title=element_blank(),
+                # Gridlines
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.background = element_blank(),
+                axis.line = element_line(colour = "black"))
+```
+
+
+# Load data
+The Raymi's vessel activity and track datasets were loaded from the data directory. Boundary data for the world and Peru were pulled from the [rnaturalearth R package](https://cran.r-project.org/web/packages/rnaturalearth/README.html). Exclusive Economic Zone boundary data came from [Marine Regions](https://marineregions.org/downloads.php). It should be noted these are older data, as the most current version is 11 from 2019.
+
+```{r load, echo = T, results = 'hide'}
+#############################################
+#############################################
+##### 3. Read in vessel and boundary data
+
+# Read data
+## Vessel data
+vessels <- read.csv(paste(data, "events.csv", sep = "/"))
+
+## Track data
+tracks <- read.csv(paste(data, "tracks.csv", sep = "/"))
+
+# World and country data
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+peru <- rnaturalearth::ne_countries(country = "Peru", scale = "medium", returnclass = "sf")
+
+# EEZ data
+eez <- st_read(dsn = data, layer = "World_EEZ_v8_2014")
+```
+
+# Inspect data
+It is common for disruptions and other issues to the Global Positioning System to affect the record of the logging coordinates. Thus, plots of the latitudes and longitudes were run to determine if there were any outliers. For instance, there was a record of what appeared to be a latitude of 100, which is not possible since latitudes run from -90 to 90. Aside from that, there was a single observation that appeared to not follow the majority of records. Longtitude also had two values that appeared to be outliers.
+
+Vessel events data had two different types recorded: fishing and anchoring.
+```{r inspect}
+#############################################
+#############################################
+##### 4. Inspect the data
+names(tracks)
+plot(tracks$lat) # can see that there is a latitude with a value near 100, which is not possible, also an outlier likely with a single observation well below -50
+plot(tracks$lon) # similarly two values appear to be outliers for the longitude
+
+# vessel events data
+head(vessels)
+unique(vessels$event_type) # only two events are fishing and anchoring
+```
+
+# Clean data
+To have the best available data for analysis, the outliers were removed from the tracks dataset.
+
+```{r clean}
+#############################################
+#############################################
+##### 5. Clean data for preparation
+
+# remove any NA values and what appear to be outlier observations
+tracks_clean <- tracks %>%
+  # remove any longitude and latitude values that are NA
+  filter(!is.na(lat) & # latitude
+         !is.na(lon) & # longitude
+         !(lat >= 90) & # vessels should not be above 90 degrees
+         !(lat <= -50)) %>% # vessels should not be below -50 degrees
+  tidyr::separate(timestamp, into=c("date", "time"), sep=" ", remove=F, convert = T) %>%
+  dplyr::arrange(X)
+
+View(tracks_clean)
+
+plot(tracks_clean$lat) # these plots make more sense
+plot(tracks_clean$lon) # these plots make more sense
+
+rm(tracks) # no longer will be needed
+```
+
+# Transform data
+For the vessel data, new fields were created for latitude, longitude, and time respectively. Additionally, from the event start and end timestamps, a new field contained total duration in hours for each event.
+```{r vessel transform}
+#############################################
+#############################################
+##### 6. Transform vessel data
+vessels_clean <- vessels %>%
+  # Separate lat/long/start
+  tidyr::separate(latlonstart, into=c("lat", "long", "date", "time"), sep=" ", remove=F, convert = T) %>% 
+  # Build event start time
+  mutate(event_start=paste(date, time)) %>% 
+  # Calculate event duration
+  mutate(event_duration_hr = difftime(event_end, event_start, units = "hours")) %>% 
+  # Simplify
+  dplyr::select(vessel_1_id, event_type, event_start, event_end, event_duration_hr, lat, long) %>%
+  # Recode activity
+  dplyr::mutate(event_type = recode(event_type,
+                                    "anchorage" = "Anchorage",
+                                    "fishing" = "Fishing"))
+
+rm(vessels)
+```
+
+```{r event transform}
+fishing <- vessels_clean %>%
+  dplyr::filter(event_type == "Fishing") %>%
+  st_as_sf(., coords = c("long", "lat"), crs = 4326)
+
+fishing
+
+anchorage <- vessels_clean %>%
+  dplyr::filter(event_type == "Anchorage") %>%
+  st_as_sf(., coords = c("long", "lat"), crs = 4326)
+
+anchorage
+```
+
+# Visualize data
+```{r}
+#############################################
+#############################################
+##### 7. Visualize data
+vessel_world_pos <- ggplot() +
+  # Plot EEZ
+  geom_sf(data = eez, linetype = "dashed", fill = NA, color = "grey10", size = 0.3) +
+  # Plot countries
+  geom_sf(data = world, fill = "grey80", color = "white", size = 0.4) +
+  geom_sf(data = peru, fill = "grey60", color = "white", size = 0.4) +
+  # Plot tracks
+  geom_path(data = tracks_clean, mapping=aes(x = lon, y = lat), linetype = "solid", color = "#696969") +
+  # Plot points
+  geom_point(data = vessels_clean, mapping=aes(x=long, y=lat, color=event_type), size = 0.5) +
+  # Crop
+  coord_sf(xlim = c(-65, -85), ylim = c(-25, -10)) +
+  # Labels
+  # Obtained ship name from searching for the MMSI value (https://www.marinetraffic.com/en/ais/details/ships/shipid:168217/mmsi:224892000/imo:9024619/vessel:RAYMI)
+  labs(title = paste0("Raymi\n",vessels_clean$vessel_1_id[1]), 
+       caption = "Vessel tracks for Raymi (MMSI 224892000) during a
+       fishing trip lasting from 2017-06-01 to 2017-08-01.\nData source: Global Fishing Watch") +
+  # Legend
+  scale_color_manual(name="Activity", values=c("red", "green")) +
+  # Theme
+  theme_bw() +  theme1
+
+vessel_world_pos
+```
+
+# Patterns / trends
+The Raymi for June and July 2017 spent its voyage to the west of Peru and Chile's exclusive economic zone. During its 60-day voyage it landed at a port in Peru for 131 hours before setting a sea for more fishing. In total it spent more than 921 hours fishing. Since activity hours are summarized between time stamps and not at the end of the day, total time spent on an activity during each day a sea can have some error. Given that, the longest times fishing were for 62 hours starting on July 8th and 55 hours from July 30th. The four least active days were in June, whereas 9 of top 10 most active record fishing activities were in July. July had more than double logged fishing hours than June, nearly 625 hours compared to 297 hours. Again, the Raymi was at port for 131 hours, which occurred in June, but that still is 150 hours shorter than the time in July. Should be noted that July is a day longer than June -- though that extra 24 hours cannot explain the 150 hour difference. Fishing time appears to oscillate. This could be due to changes in climatic or fish dynamics, but perhaps also happens so crews can recover. With very long fishing followed by shorter fishing time. The crew logged approximately 15,250 kilometers during the voyage.
+
+
+```{r open ended section}
+#############################################
+#############################################
+##### 8. Summary statistics
+
+# Days at sea
+days_asea <- tracks_clean %>%
+  group_by(date) %>%
+  summarise(Event = mdy(date),
+            Days = Event - lag(Event)) %>%
+  dplyr::filter(Days > 0)
+
+asea_time <- nrow(days_asea)
+print(paste(asea_time, "days at sea"))
+
+# event hours
+event_hours <- vessels_clean %>%
+  dplyr::group_by(event_type) %>%
+  dplyr::summarise(hours = sum(event_duration_hr))
+head(event_hours)
+
+# Event type hours by month
+fishing_date <- vessels_clean %>%
+  tidyr::separate(event_end, into = c("date", "time"), sep = " ", remove=F, convert = T) %>%
+  # Build event start time
+  mutate(event_start=paste(date, time)) %>%
+  # Simplify
+  dplyr::select(vessel_1_id, event_type, date, event_duration_hr, lat, long) %>%
+  # Group by date and event type
+  dplyr::group_by(date,
+                  event_type) %>%
+  # Calculate total hours by event per day
+  dplyr::summarise(hours = sum(event_duration_hr)) %>%
+  tidyr::separate(hours, into = c("time", "unit"), sep = " ", remove = F, convert = T) %>%
+  # Simplify
+  dplyr::select(-unit) %>%
+  dplyr::arrange(desc(time))
+View(fishing_date)
+
+raymi_fishing_date <- ggplot() +
+  geom_point(data = fishing_date, aes(x = date, y = time, color = event_type)) +
+  # Legend
+  scale_color_manual(name="Activity", values=c(c("#87468B", "#BFCE67"))) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = paste0("Raymi\n",vessels_clean$vessel_1_id[1]), 
+       caption = "Total hours for each event per day for Raymi (MMSI 224892000)
+       during a fishing trip lasting from 2017-06-01 to 2017-08-01.\nData source: Global Fishing Watch") +
+  xlab("Date") +
+  ylab("Total hours")
+raymi_fishing_date
+
+month_hours <- fishing_date %>%
+  # Convert date to date class
+  dplyr::mutate(date = as.Date(date)) %>%
+  # Calculate month
+  dplyr::mutate(month = lubridate::month(date)) %>%
+  # Group by month and event
+  dplyr::group_by(month,
+                  event_type) %>%
+  dplyr::summarise(month_hours = sum(hours))
+head(month_hours)
+
+# distance traveled
+track_points_df <- tracks_clean %>% 
+  mutate(group="track") %>% 
+  dplyr::select(group, lon, lat)
+track_points_sf <- track_points_df %>% 
+  sf::st_as_sf(coords=c("lon", "lat"), crs=sf::st_crs(world))
+track_line_sf <- track_points_sf %>% 
+  dplyr::group_by(group) %>%
+  dplyr::summarise(do_union = FALSE) %>%
+  sf::st_cast("MULTILINESTRING") 
+distance <- sf::st_length(track_line_sf)
+
+print(paste(round(distance, 0), "m travelled by the Raymi during June 2017 through July 2017"))
+```
+
+# Export data
+## Tracks
+```{r export}
+#############################################
+#############################################
+##### 9. Export data
+saveRDS(tracks_clean, file=file.path(data, "raymi_tracks_062017-072017.Rds"))
+```
+
+## Vessels
+```{r}
+saveRDS(vessels_clean, file=file.path(data, "raymi_events_062017-072017.Rds"))
+```
+
+## Summary data
+```{r}
+saveRDS(event_hours, file=file.path(data, "raymi_event_hrs_062017-072017.Rds"))
+saveRDS(fishing_date, file=file.path(data, "raymi_fishing_date_062017-072017.Rds"))
+saveRDS(month_hours, file=file.path(data, "raymi_mnth_hrs_062017-072017.Rds"))
+```
+
+## Geopackage
+```{r}
+st_write(obj = track_points_sf, dsn = geopackage, layer = "raymi_points", append = F)
+st_write(obj = track_line_sf, dsn = geopackage, layer = "raymi_track", append = F)
+st_write(obj = world, dsn = geopackage, layer = "world_countries", append = F)
+st_write(obj = peru, dsn = geopackage, layer = "peru", append = F)
+st_write(obj = eez, dsn = geopackage, layer = "eez", append = F)
+```
+
+## Map
+### Save plots
+```{r}
+ggsave(vessel_world_pos, filename = file.path(plotdir, "peru_fishing_map.png"),
+       width = 12, height = 8, units = "in", dpi = 600)
+ggsave(raymi_fishing_date, filename = file.path(plotdir, "raymi_daily_activity_time.png"),
+       width = 12, height = 8, units = "in", dpi = 600)
+```
+
